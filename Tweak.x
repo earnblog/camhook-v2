@@ -1,15 +1,20 @@
-#import "AVFoundation/AVFoundation.h"
-#import "UIKit/UIKit.h"
-#import "CoreMedia/CoreMedia.h"
-#import "CoreVideo/CoreVideo.h"
-#import "os/log.h"
+// CamHook 换帧版 —— 在日志版基础上增加 VCamProvider + 帧替换
+#import <AVFoundation/AVFoundation.h>
+#import <UIKit/UIKit.h>
+#import <os/log.h>
+#import <objc/runtime.h>
+#import "VCamProvider.h"
 
-// ================================================================
-// 1. 顶部横幅 (PAC Safe 纯系统类)
-// ================================================================
+// ===================== 全局 =====================
+static VCamProvider *gProvider = NULL;
 static NSTimeInterval gLastBanner = 0;
 
-static void CamHookShowBanner(void) {
+// 测试视频路径（请提前把 MP4 拷到这个位置）
+// 推荐用 Filza 放到 /var/mobile/Media/test.mp4
+static const char *kTestVideoPath = "/var/mobile/Media/test.mp4";
+
+// ===================== 横幅 =====================
+static void CamHookShowBanner(const char *msg) {
     dispatch_async(dispatch_get_main_queue(), ^{
         NSTimeInterval now = [[NSDate date] timeIntervalSince1970];
         if (now - gLastBanner < 3.0) return;
@@ -39,9 +44,9 @@ static void CamHookShowBanner(void) {
         banner.userInteractionEnabled = NO;
 
         UILabel *label = [[UILabel alloc] initWithFrame:CGRectMake(14, 0, width - 28, 60)];
-        label.text = [NSString stringWithUTF8String:"\xE2\x9C\x93 CamHook \xE5\xB7\xB2\xE6\x9B\xBF\xE6\x8D\xA2\xE7\x9B\xB8\xE6\x9C\xBA\xE7\x94\xBB\xE9\x9D\xA2"];
+        label.text = [NSString stringWithUTF8String:msg];
         label.textColor = [UIColor whiteColor];
-        label.font = [UIFont boldSystemFontOfSize:16.0];
+        label.font = [UIFont boldSystemFontOfSize:15.0];
         label.numberOfLines = 2;
         [banner addSubview:label];
         [win addSubview:banner];
@@ -49,7 +54,7 @@ static void CamHookShowBanner(void) {
         [UIView animateWithDuration:0.35 animations:^{
             banner.frame = CGRectMake(12, topY + 8, width, 60);
         } completion:^(BOOL finished) {
-            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.0 * NSEC_PER_SEC)),
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.5 * NSEC_PER_SEC)),
                            dispatch_get_main_queue(), ^{
                 [UIView animateWithDuration:0.35 animations:^{
                     banner.frame = CGRectMake(12, -90, width, 60);
@@ -61,174 +66,140 @@ static void CamHookShowBanner(void) {
     });
 }
 
-// ================================================================
-// 2. 纯 C 状态解码器 (规避 PAC)
-// ================================================================
-typedef struct {
-    AVAsset *asset;
-    AVAssetReader *reader;
-    AVAssetReaderTrackOutput *output;
-    BOOL isInitialized;
-} VCamCState;
+// ===================== 创建替换后的 CMSampleBuffer =====================
+static CMSampleBufferRef CamHookCreateSampleBuffer(CVPixelBufferRef pixelBuffer,
+                                                   CMTime pts,
+                                                   CMTime duration) {
+    if (!pixelBuffer) return NULL;
 
-static VCamCState g_vcam = {nil, nil, nil, NO};
-
-static void InitVCamDecoder(NSString *videoPath) {
-    if (g_vcam.isInitialized && g_vcam.reader && g_vcam.reader.status == AVAssetReaderStatusReading) {
-        return;
+    CMVideoFormatDescriptionRef formatDesc = NULL;
+    OSStatus status = CMVideoFormatDescriptionCreateForImageBuffer(kCFAllocatorDefault,
+                                                                    pixelBuffer,
+                                                                    &formatDesc);
+    if (status != noErr || !formatDesc) {
+        os_log(OS_LOG_DEFAULT, "[CamHook] CreateForImageBuffer format failed: %d", (int)status);
+        return NULL;
     }
 
-    NSFileManager *fm = [NSFileManager defaultManager];
-    if (![fm fileExistsAtPath:videoPath]) {
-        os_log(OS_LOG_DEFAULT, "[CamHook] ⚠️ 找不到视频文件: %{public}@", videoPath);
-        return;
-    }
-
-    NSURL *url = [NSURL fileURLWithPath:videoPath];
-    g_vcam.asset = [AVAsset assetWithURL:url];
-    
-    NSError *error = nil;
-    g_vcam.reader = [[AVAssetReader alloc] initWithAsset:g_vcam.asset error:&error];
-    if (error || !g_vcam.reader) {
-        os_log(OS_LOG_DEFAULT, "[CamHook] ❌ AVAssetReader 创建失败");
-        return;
-    }
-
-    AVAssetTrack *videoTrack = [[g_vcam.asset tracksWithMediaType:AVMediaTypeVideo] firstObject];
-    if (!videoTrack) return;
-
-    NSDictionary *settings = @{
-        (id)kCVPixelBufferPixelFormatTypeKey : @(kCVPixelFormatType_32BGRA)
+    CMSampleTimingInfo timing = {
+        .duration = duration,
+        .presentationTimeStamp = pts,
+        .decodeTimeStamp = kCMTimeInvalid
     };
 
-    g_vcam.output = [[AVAssetReaderTrackOutput alloc] initWithTrack:videoTrack outputSettings:settings];
-    if ([g_vcam.reader canAddOutput:g_vcam.output]) {
-        [g_vcam.reader addOutput:g_vcam.output];
-        [g_vcam.reader startReading];
-        g_vcam.isInitialized = YES;
-        os_log(OS_LOG_DEFAULT, "[CamHook] ✅ C 解码器初始化成功");
-    }
-}
+    CMSampleBufferRef newBuffer = NULL;
+    status = CMSampleBufferCreateForImageBuffer(kCFAllocatorDefault,
+                                                pixelBuffer,
+                                                true,
+                                                NULL, NULL,
+                                                formatDesc,
+                                                &timing,
+                                                &newBuffer);
+    CFRelease(formatDesc);
 
-static CMSampleBufferRef CopyVideoBufferWithCameraTiming(CMSampleBufferRef origSampleBuffer) {
-    if (!g_vcam.isInitialized || !g_vcam.output) {
+    if (status != noErr) {
+        os_log(OS_LOG_DEFAULT, "[CamHook] CMSampleBufferCreateForImageBuffer failed: %d", (int)status);
         return NULL;
     }
+    return newBuffer;
+}
 
-    CMSampleBufferRef videoSampleBuffer = [g_vcam.output copyNextSampleBuffer];
-    
-    if (!videoSampleBuffer) {
-        g_vcam.isInitialized = NO;
-        InitVCamDecoder(@"/var/mobile/demo.mp4");
-        if (g_vcam.output) {
-            videoSampleBuffer = [g_vcam.output copyNextSampleBuffer];
+// ===================== 轻量 Proxy Delegate =====================
+@interface CamHookProxy : NSObject <AVCaptureVideoDataOutputSampleBufferDelegate>
+@property (nonatomic, weak) id<AVCaptureVideoDataOutputSampleBufferDelegate> realDelegate;
+@property (nonatomic, strong) dispatch_queue_t realQueue;
+@end
+
+@implementation CamHookProxy
+
+- (void)captureOutput:(AVCaptureOutput *)output
+didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
+       fromConnection:(AVCaptureConnection *)connection
+{
+    if (!gProvider || !VCamProviderIsReady(gProvider)) {
+        if ([self.realDelegate respondsToSelector:@selector(captureOutput:didOutputSampleBuffer:fromConnection:)]) {
+            [self.realDelegate captureOutput:output didOutputSampleBuffer:sampleBuffer fromConnection:connection];
         }
-    }
-
-    if (!videoSampleBuffer) return NULL;
-
-    CVImageBufferRef imageBuffer = CMSampleBufferGetImageBuffer(videoSampleBuffer);
-    if (!imageBuffer) {
-        CFRelease(videoSampleBuffer);
-        return NULL;
-    }
-
-    CMSampleTimingInfo timingInfo;
-    CMSampleBufferGetSampleTimingInfo(origSampleBuffer, 0, &timingInfo);
-
-    CMVideoFormatDescriptionRef formatDescription = NULL;
-    CMVideoFormatDescriptionCreateForImageBuffer(kCFAllocatorDefault, imageBuffer, &formatDescription);
-
-    CMSampleBufferRef customSampleBuffer = NULL;
-    CMSampleBufferCreateForImageBuffer(kCFAllocatorDefault,
-                                       imageBuffer,
-                                       true,
-                                       NULL,
-                                       NULL,
-                                       formatDescription,
-                                       &timingInfo,
-                                       &customSampleBuffer);
-
-    if (formatDescription) CFRelease(formatDescription);
-    CFRelease(videoSampleBuffer);
-
-    return customSampleBuffer;
-}
-
-
-// ================================================================
-// 3. 动态 Hook Delegate (Theos 正规语法)
-// ================================================================
-
-%group DelegateHook
-
-%hook DynamicDelegateClass
-
-- (void)captureOutput:(AVCaptureOutput *)output didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer fromConnection:(AVCaptureConnection *)connection {
-    if (!sampleBuffer) {
-        %orig;
         return;
     }
 
-    CMSampleBufferRef replacementBuffer = CopyVideoBufferWithCameraTiming(sampleBuffer);
-    
-    if (replacementBuffer) {
-        %orig(output, replacementBuffer, connection);
-        CFRelease(replacementBuffer);
-    } else {
-        %orig(output, sampleBuffer, connection);
+    CMTime pts = CMSampleBufferGetPresentationTimeStamp(sampleBuffer);
+    CMTime duration = CMSampleBufferGetDuration(sampleBuffer);
+    if (CMTIME_IS_INVALID(duration) || CMTimeCompare(duration, kCMTimeZero) == 0) {
+        duration = CMTimeMake(1, 30);
     }
-}
 
-%end
-%end
+    CVPixelBufferRef videoPB = VCamProviderCopyPixelBufferForTime(gProvider, pts);
+    if (videoPB) {
+        CMSampleBufferRef fake = CamHookCreateSampleBuffer(videoPB, pts, duration);
+        CFRelease(videoPB);
 
-
-// ================================================================
-// 4. 静态 Hook
-// ================================================================
-
-%hook AVCaptureVideoDataOutput
-
-- (void)setSampleBufferDelegate:(id)sampleBufferDelegate queue:(dispatch_queue_t)sampleBufferCallbackQueue {
-    os_log(OS_LOG_DEFAULT, "[CamHook] setSampleBufferDelegate 已拦截");
-    
-    if (sampleBufferDelegate) {
-        Class delegateClass = [sampleBufferDelegate class];
-        
-        static NSMutableSet *hookedClasses;
-        static dispatch_once_t onceToken;
-        dispatch_once(&onceToken, ^{
-            hookedClasses = [NSMutableSet new];
-        });
-        
-        NSString *className = NSStringFromClass(delegateClass);
-        if (![hookedClasses containsObject:className]) {
-            [hookedClasses addObject:className];
-            os_log(OS_LOG_DEFAULT, "[CamHook] 动态挂载 Delegate 类: %{public}@", className);
-            
-            %init(DelegateHook, DynamicDelegateClass = delegateClass);
+        if (fake) {
+            if ([self.realDelegate respondsToSelector:@selector(captureOutput:didOutputSampleBuffer:fromConnection:)]) {
+                [self.realDelegate captureOutput:output didOutputSampleBuffer:fake fromConnection:connection];
+            }
+            CFRelease(fake);
+            return;
         }
-        
-        InitVCamDecoder(@"/var/mobile/demo.mp4");
     }
 
-    %orig;
+    if ([self.realDelegate respondsToSelector:@selector(captureOutput:didOutputSampleBuffer:fromConnection:)]) {
+        [self.realDelegate captureOutput:output didOutputSampleBuffer:sampleBuffer fromConnection:connection];
+    }
 }
 
-%end
+- (void)captureOutput:(AVCaptureOutput *)output
+  didDropSampleBuffer:(CMSampleBufferRef)sampleBuffer
+       fromConnection:(AVCaptureConnection *)connection
+{
+    if ([self.realDelegate respondsToSelector:@selector(captureOutput:didDropSampleBuffer:fromConnection:)]) {
+        [self.realDelegate captureOutput:output didDropSampleBuffer:sampleBuffer fromConnection:connection];
+    }
+}
 
+@end
+
+// ===================== Hooks =====================
 %hook AVCaptureSession
-
 - (void)startRunning {
     %orig;
-    os_log(OS_LOG_DEFAULT, "[CamHook] Session startRunning");
-    CamHookShowBanner();
-}
 
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        if (!gProvider) {
+            gProvider = VCamProviderCreate(kTestVideoPath);
+        }
+    });
+
+    if (gProvider && VCamProviderIsReady(gProvider)) {
+        CamHookShowBanner("\xE2\x9C\x93 CamHook \xE6\x8D\xA2\xE5\xB8\xA7\xE6\xA8\xA1\xE5\xBC\x8F\xE5\xB7\xB2\xE5\x90\xAF\xE7\x94\xA8");
+        os_log(OS_LOG_DEFAULT, "[CamHook] startRunning + VCam ready");
+    } else {
+        CamHookShowBanner("\xE2\x9C\x93 CamHook \xE5\xB7\xB2\xE5\x8A\xA0\xE8\xBD\xBD (\xE6\x97\xA0\xE8\xA7\x86\xE9\xA2\x91)");
+        os_log(OS_LOG_DEFAULT, "[CamHook] startRunning but no video at %s", kTestVideoPath);
+    }
+}
+%end
+
+%hook AVCaptureVideoDataOutput
+- (void)setSampleBufferDelegate:(id)sampleBufferDelegate queue:(dispatch_queue_t)sampleBufferCallbackQueue {
+    os_log(OS_LOG_DEFAULT, "[CamHook] setSampleBufferDelegate: %{public}@ queue=%p",
+           NSStringFromClass(object_getClass(sampleBufferDelegate)), sampleBufferCallbackQueue);
+
+    if (sampleBufferDelegate && sampleBufferCallbackQueue) {
+        CamHookProxy *proxy = [CamHookProxy new];
+        proxy.realDelegate = sampleBufferDelegate;
+        proxy.realQueue = sampleBufferCallbackQueue;
+
+        objc_setAssociatedObject(self, "camhook_proxy", proxy, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+
+        %orig(proxy, sampleBufferCallbackQueue);
+    } else {
+        %orig;
+    }
+}
 %end
 
 %ctor {
-    os_log(OS_LOG_DEFAULT, "[CamHook] 画面替换版已加载");
-    %init; 
+    os_log(OS_LOG_DEFAULT, "[CamHook] 换帧版已加载 (VCamProvider + Proxy)");
 }
