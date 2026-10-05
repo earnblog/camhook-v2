@@ -1,8 +1,8 @@
-#import 
-#import 
-#import 
-#import 
-#import 
+#import "AVFoundation/AVFoundation.h"
+#import "UIKit/UIKit.h"
+#import "CoreMedia/CoreMedia.h"
+#import "CoreVideo/CoreVideo.h"
+#import "os/log.h"
 
 // ================================================================
 // 1. 顶部横幅 (PAC Safe 纯系统类)
