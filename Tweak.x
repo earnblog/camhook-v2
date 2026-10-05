@@ -1,8 +1,12 @@
 #import 
 #import 
 #import 
+#import 
+#import 
 
-// 1. 顶部横幅（PAC Safe）
+// ================================================================
+// 1. 顶部横幅 (PAC Safe 纯系统类)
+// ================================================================
 static NSTimeInterval gLastBanner = 0;
 
 static void CamHookShowBanner(void) {
@@ -57,7 +61,9 @@ static void CamHookShowBanner(void) {
     });
 }
 
-// 2. 纯 C 状态解码器（无自定义 ObjC 类）
+// ================================================================
+// 2. 纯 C 状态解码器 (规避 PAC)
+// ================================================================
 typedef struct {
     AVAsset *asset;
     AVAssetReader *reader;
@@ -149,7 +155,76 @@ static CMSampleBufferRef CopyVideoBufferWithCameraTiming(CMSampleBufferRef origS
     return customSampleBuffer;
 }
 
-// 3. Hooks
+
+// ================================================================
+// 3. 动态 Hook Delegate (这是 Theos 正规语法)
+// ================================================================
+
+// 定义一个分组，专门用来动态 Hook 未知的 Delegate 类
+%group DelegateHook
+
+// DynamicDelegateClass 会在运行时被替换为真正的 Delegate 类名
+%hook DynamicDelegateClass
+
+- (void)captureOutput:(AVCaptureOutput *)output didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer fromConnection:(AVCaptureConnection *)connection {
+    if (!sampleBuffer) {
+        %orig;
+        return;
+    }
+
+    CMSampleBufferRef replacementBuffer = CopyVideoBufferWithCameraTiming(sampleBuffer);
+    
+    if (replacementBuffer) {
+        // 传递替换后的视频帧
+        %orig(output, replacementBuffer, connection);
+        CFRelease(replacementBuffer);
+    } else {
+        // 解码失败时，原样放行真实画面
+        %orig(output, sampleBuffer, connection);
+    }
+}
+
+%end
+%end // end DelegateHook group
+
+
+// ================================================================
+// 4. 静态 Hook
+// ================================================================
+
+%hook AVCaptureVideoDataOutput
+
+- (void)setSampleBufferDelegate:(id)sampleBufferDelegate queue:(dispatch_queue_t)sampleBufferCallbackQueue {
+    os_log(OS_LOG_DEFAULT, "[CamHook] setSampleBufferDelegate 已拦截");
+    
+    if (sampleBufferDelegate) {
+        // 获取实际的 delegate 类型（比如 CAMCaptureEngine）
+        Class delegateClass = [sampleBufferDelegate class];
+        
+        static NSMutableSet *hookedClasses;
+        static dispatch_once_t onceToken;
+        dispatch_once(&onceToken, ^{
+            hookedClasses = [NSMutableSet new];
+        });
+        
+        NSString *className = NSStringFromClass(delegateClass);
+        // 避免重复 Hook 导致崩溃
+        if (![hookedClasses containsObject:className]) {
+            [hookedClasses addObject:className];
+            os_log(OS_LOG_DEFAULT, "[CamHook] 动态挂载 Delegate 类: %{public}@", className);
+            
+            // 运行时将 DelegateHook 挂载到真实的类上
+            %init(DelegateHook, DynamicDelegateClass = delegateClass);
+        }
+        
+        InitVCamDecoder(@"/var/mobile/demo.mp4");
+    }
+
+    %orig;
+}
+
+%end
+
 %hook AVCaptureSession
 
 - (void)startRunning {
@@ -160,33 +235,8 @@ static CMSampleBufferRef CopyVideoBufferWithCameraTiming(CMSampleBufferRef origS
 
 %end
 
-%hook AVCaptureVideoDataOutput
-
-- (void)setSampleBufferDelegate:(id)sampleBufferDelegate queue:(dispatch_queue_t)sampleBufferCallbackQueue {
-    InitVCamDecoder(@"/var/mobile/demo.mp4");
-    os_log(OS_LOG_DEFAULT, "[CamHook] setSampleBufferDelegate 已拦截");
-    %orig;
-}
-
-%end
-
-%hookf(void, "-[NSObject captureOutput:didOutputSampleBuffer:fromConnection:]", id self, SEL _cmd, AVCaptureOutput *output, CMSampleBufferRef sampleBuffer, AVCaptureConnection *connection) {
-    
-    if (!sampleBuffer) {
-        %orig(self, _cmd, output, sampleBuffer, connection);
-        return;
-    }
-
-    CMSampleBufferRef replacementBuffer = CopyVideoBufferWithCameraTiming(sampleBuffer);
-    
-    if (replacementBuffer) {
-        %orig(self, _cmd, output, replacementBuffer, connection);
-        CFRelease(replacementBuffer);
-    } else {
-        %orig(self, _cmd, output, sampleBuffer, connection);
-    }
-}
-
 %ctor {
-    os_log(OS_LOG_DEFAULT, "[CamHook] 画面替换版 (C-Decoder) 已加载");
+    os_log(OS_LOG_DEFAULT, "[CamHook] 画面替换版已加载");
+    // 初始化默认分组（AVCaptureSession 和 AVCaptureVideoDataOutput）
+    %init; 
 }
