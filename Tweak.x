@@ -9,8 +9,7 @@
 static VCamProvider *gProvider = NULL;
 static NSTimeInterval gLastBanner = 0;
 
-// 测试视频路径（请提前把 MP4 拷到这个位置）
-// 推荐用 Filza 放到 /var/mobile/Media/test.mp4
+// 测试视频路径
 static const char *kTestVideoPath = "/var/mobile/Media/test.mp4";
 
 // ===================== 横幅 =====================
@@ -164,19 +163,19 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
 - (void)startRunning {
     %orig;
 
-    static dispatch_once_t onceToken;
-    dispatch_once(&onceToken, ^{
-        if (!gProvider) {
-            gProvider = VCamProviderCreate(kTestVideoPath);
-        }
-    });
+    // 每次打开相机都重新尝试加载视频（方便调试）
+    if (gProvider) {
+        VCamProviderDestroy(gProvider);
+        gProvider = NULL;
+    }
+    gProvider = VCamProviderCreate(kTestVideoPath);
 
     if (gProvider && VCamProviderIsReady(gProvider)) {
         CamHookShowBanner("\xE2\x9C\x93 CamHook \xE6\x8D\xA2\xE5\xB8\xA7\xE6\xA8\xA1\xE5\xBC\x8F\xE5\xB7\xB2\xE5\x90\xAF\xE7\x94\xA8");
         os_log(OS_LOG_DEFAULT, "[CamHook] startRunning + VCam ready");
     } else {
         CamHookShowBanner("\xE2\x9C\x93 CamHook \xE5\xB7\xB2\xE5\x8A\xA0\xE8\xBD\xBD (\xE6\x97\xA0\xE8\xA7\x86\xE9\xA2\x91)");
-        os_log(OS_LOG_DEFAULT, "[CamHook] startRunning but no video at %s", kTestVideoPath);
+        os_log(OS_LOG_DEFAULT, "[CamHook] startRunning but VCam FAILED, path=%s", kTestVideoPath);
     }
 }
 %end
