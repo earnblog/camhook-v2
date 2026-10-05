@@ -157,13 +157,11 @@ static CMSampleBufferRef CopyVideoBufferWithCameraTiming(CMSampleBufferRef origS
 
 
 // ================================================================
-// 3. 动态 Hook Delegate (这是 Theos 正规语法)
+// 3. 动态 Hook Delegate (Theos 正规语法)
 // ================================================================
 
-// 定义一个分组，专门用来动态 Hook 未知的 Delegate 类
 %group DelegateHook
 
-// DynamicDelegateClass 会在运行时被替换为真正的 Delegate 类名
 %hook DynamicDelegateClass
 
 - (void)captureOutput:(AVCaptureOutput *)output didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer fromConnection:(AVCaptureConnection *)connection {
@@ -175,17 +173,15 @@ static CMSampleBufferRef CopyVideoBufferWithCameraTiming(CMSampleBufferRef origS
     CMSampleBufferRef replacementBuffer = CopyVideoBufferWithCameraTiming(sampleBuffer);
     
     if (replacementBuffer) {
-        // 传递替换后的视频帧
         %orig(output, replacementBuffer, connection);
         CFRelease(replacementBuffer);
     } else {
-        // 解码失败时，原样放行真实画面
         %orig(output, sampleBuffer, connection);
     }
 }
 
 %end
-%end // end DelegateHook group
+%end
 
 
 // ================================================================
@@ -198,7 +194,6 @@ static CMSampleBufferRef CopyVideoBufferWithCameraTiming(CMSampleBufferRef origS
     os_log(OS_LOG_DEFAULT, "[CamHook] setSampleBufferDelegate 已拦截");
     
     if (sampleBufferDelegate) {
-        // 获取实际的 delegate 类型（比如 CAMCaptureEngine）
         Class delegateClass = [sampleBufferDelegate class];
         
         static NSMutableSet *hookedClasses;
@@ -208,12 +203,10 @@ static CMSampleBufferRef CopyVideoBufferWithCameraTiming(CMSampleBufferRef origS
         });
         
         NSString *className = NSStringFromClass(delegateClass);
-        // 避免重复 Hook 导致崩溃
         if (![hookedClasses containsObject:className]) {
             [hookedClasses addObject:className];
             os_log(OS_LOG_DEFAULT, "[CamHook] 动态挂载 Delegate 类: %{public}@", className);
             
-            // 运行时将 DelegateHook 挂载到真实的类上
             %init(DelegateHook, DynamicDelegateClass = delegateClass);
         }
         
@@ -237,6 +230,5 @@ static CMSampleBufferRef CopyVideoBufferWithCameraTiming(CMSampleBufferRef origS
 
 %ctor {
     os_log(OS_LOG_DEFAULT, "[CamHook] 画面替换版已加载");
-    // 初始化默认分组（AVCaptureSession 和 AVCaptureVideoDataOutput）
     %init; 
 }
