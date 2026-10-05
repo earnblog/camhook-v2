@@ -3,18 +3,18 @@
 #import <pthread.h>
 
 struct VCamProvider {
-    AVAsset           *asset;
-    AVAssetReader     *reader;
-    AVAssetReaderTrackOutput *output;
-    CMTime             duration;
-    CMTime             frameDuration;
-    CMTime             firstCameraPts;
-    bool               hasFirstPts;
-    bool               loop;
-    char              *path;
-    pthread_mutex_t    lock;
-    int                width;
-    int                height;
+    AVAsset                    *asset;
+    AVAssetReader              *reader;
+    AVAssetReaderTrackOutput   *output;
+    CMTime                      duration;
+    CMTime                      frameDuration;
+    CMTime                      firstCameraPts;
+    bool                        hasFirstPts;
+    bool                        loop;
+    char                       *path;
+    pthread_mutex_t             lock;
+    int                         width;
+    int                         height;
 };
 
 static bool VCamProviderRestartReader(VCamProvider *p) {
@@ -33,7 +33,7 @@ static bool VCamProviderRestartReader(VCamProvider *p) {
         return false;
     }
 
-    // 优先用相机常见的 YUV 格式，减少后续转换
+    // 使用相机常见的 YUV 格式，减少转换开销
     NSDictionary *settings = @{
         (id)kCVPixelBufferPixelFormatTypeKey: @(kCVPixelFormatType_420YpCbCr8BiPlanarFullRange)
     };
@@ -76,7 +76,7 @@ VCamProvider *VCamProviderCreate(const char *mp4Path) {
         return NULL;
     }
 
-    // 同步拿 duration（简单测试够用）
+    // 同步获取 duration
     p->duration = p->asset.duration;
     if (CMTIME_IS_INVALID(p->duration) || CMTimeCompare(p->duration, kCMTimeZero) <= 0) {
         os_log(OS_LOG_DEFAULT, "[CamHook] invalid duration");
@@ -140,22 +140,15 @@ CVPixelBufferRef VCamProviderCopyPixelBufferForTime(VCamProvider *p, CMTime came
         p->hasFirstPts = true;
     }
 
-    // 用相机真实时间推进，视频循环
+    // 计算已经过去的时间（目前主要用于日志和后续精确对齐扩展）
     CMTime elapsed = CMTimeSubtract(cameraPts, p->firstCameraPts);
-    if (CMTimeCompare(elapsed, kCMTimeZero) < 0) elapsed = kCMTimeZero;
-
-    CMTime videoTime = elapsed;
-    if (p->loop && CMTIME_IS_VALID(p->duration) && CMTimeCompare(p->duration, kCMTimeZero) > 0) {
-        // 简单模运算实现循环
-        Float64 sec = fmod(CMTimeGetSeconds(elapsed), CMTimeGetSeconds(p->duration));
-        videoTime = CMTimeMakeWithSeconds(sec, p->duration.timescale);
+    if (CMTimeCompare(elapsed, kCMTimeZero) < 0) {
+        elapsed = kCMTimeZero;
     }
 
-    // 这里用「连续取下一帧」近似对齐（简单可靠）
-    // 更精确可用 AVAssetReader 的 timeRange + seek，但开销更大
+    // 连续取下一帧。读到结尾就自动循环重启
     CMSampleBufferRef sb = [p->output copyNextSampleBuffer];
     if (!sb) {
-        // 读到结尾，循环重启
         if (p->loop) {
             os_log(OS_LOG_DEFAULT, "[CamHook] video ended, restart loop");
             VCamProviderRestartReader(p);
@@ -167,7 +160,7 @@ CVPixelBufferRef VCamProviderCopyPixelBufferForTime(VCamProvider *p, CMTime came
     if (sb) {
         pb = CMSampleBufferGetImageBuffer(sb);
         if (pb) {
-            CFRetain(pb);   // 调用方负责 Release
+            CFRetain(pb);   // 调用方负责 CFRelease
         }
         CFRelease(sb);
     }
