@@ -1,0 +1,36 @@
+name: build-deb
+on:
+  push:
+  workflow_dispatch:
+
+jobs:
+  theos-build:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 修复 brew openssl 冲突
+        run: |
+          brew update || true
+          brew install openssl@3 || true
+          brew link --overwrite --force openssl@3 || true
+
+      - name: 安装 Theos(用 Xcode 自带工具链)
+        run: |
+          bash -c "$(curl -fsSL https://raw.githubusercontent.com/theos/theos/master/bin/install-theos)" || true
+          echo "THEOS=\(HOME/theos" >> "\)GITHUB_ENV"
+
+      - name: 补 iOS SDK
+        run: |
+          git clone --depth 1 https://github.com/theos/sdks.git "$HOME/theos/sdks" || true
+
+      - name: 编译 rootless .deb
+        run: |
+          export THEOS=$HOME/theos
+          make package THEOS_PACKAGE_SCHEME=rootless FINALPACKAGE=1
+          ls -la packages
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: camhook-vcam-deb
+          path: packages/*.deb
