@@ -1,4 +1,5 @@
 name: build-deb
+
 on:
   push:
   workflow_dispatch:
@@ -18,7 +19,7 @@ jobs:
       - name: 安装 Theos(用 Xcode 自带工具链)
         run: |
           bash -c "$(curl -fsSL https://raw.githubusercontent.com/theos/theos/master/bin/install-theos)" || true
-          echo "THEOS=\(HOME/theos" >> "\)GITHUB_ENV"
+          echo "THEOS=$HOME/theos" >> "$GITHUB_ENV"
 
       - name: 补 iOS SDK
         run: |
@@ -27,10 +28,11 @@ jobs:
       - name: 编译 rootless .deb
         run: |
           export THEOS=$HOME/theos
+          ls "$THEOS/sdks" | head
           make package THEOS_PACKAGE_SCHEME=rootless FINALPACKAGE=1
           ls -la packages
 
       - uses: actions/upload-artifact@v4
         with:
-          name: camhook-vcam-deb
+          name: camhook-deb
           path: packages/*.deb
