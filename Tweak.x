@@ -1,4 +1,4 @@
-// CamHook 换帧版 —— 在日志版基础上增加 VCamProvider + 帧替换
+// CamHook 换帧版 —— 修复 banner PAC 崩溃
 #import <AVFoundation/AVFoundation.h>
 #import <UIKit/UIKit.h>
 #import <os/log.h>
@@ -12,7 +12,7 @@ static NSTimeInterval gLastBanner = 0;
 // 测试视频路径
 static const char *kTestVideoPath = "/var/mobile/Media/test.mp4";
 
-// ===================== 横幅 =====================
+// ===================== 安全横幅（避免 PAC） =====================
 static void CamHookShowBanner(const char *msg) {
     dispatch_async(dispatch_get_main_queue(), ^{
         NSTimeInterval now = [[NSDate date] timeIntervalSince1970];
@@ -20,27 +20,28 @@ static void CamHookShowBanner(const char *msg) {
         gLastBanner = now;
 
         UIWindow *win = nil;
-        UIWindow *anyWin = nil;
         for (UIScene *scene in UIApplication.sharedApplication.connectedScenes) {
             if ([scene isKindOfClass:[UIWindowScene class]]) {
                 for (UIWindow *w in ((UIWindowScene *)scene).windows) {
-                    if (!anyWin) anyWin = w;
-                    if (w.isKeyWindow) { win = w; break; }
+                    if (w.isKeyWindow) {
+                        win = w;
+                        break;
+                    }
                 }
             }
             if (win) break;
         }
-        if (!win) win = anyWin;
         if (!win) return;
 
         CGFloat width = win.bounds.size.width - 24.0;
         CGFloat topY = win.safeAreaInsets.top > 0 ? win.safeAreaInsets.top : 44.0;
 
-        UIView *banner = [[UIView alloc] initWithFrame:CGRectMake(12, -90, width, 60)];
+        UIView *banner = [[UIView alloc] initWithFrame:CGRectMake(12, topY + 8, width, 60)];
         banner.backgroundColor = [[UIColor blackColor] colorWithAlphaComponent:0.85];
         banner.layer.cornerRadius = 14.0;
         banner.clipsToBounds = YES;
         banner.userInteractionEnabled = NO;
+        banner.alpha = 0.0;
 
         UILabel *label = [[UILabel alloc] initWithFrame:CGRectMake(14, 0, width - 28, 60)];
         label.text = [NSString stringWithUTF8String:msg];
@@ -50,18 +51,16 @@ static void CamHookShowBanner(const char *msg) {
         [banner addSubview:label];
         [win addSubview:banner];
 
-        [UIView animateWithDuration:0.35 animations:^{
-            banner.frame = CGRectMake(12, topY + 8, width, 60);
-        } completion:^(BOOL finished) {
-            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.5 * NSEC_PER_SEC)),
-                           dispatch_get_main_queue(), ^{
-                [UIView animateWithDuration:0.35 animations:^{
-                    banner.frame = CGRectMake(12, -90, width, 60);
-                } completion:^(BOOL f2) {
-                    [banner removeFromSuperview];
-                }];
-            });
+        // 简单淡入，不使用复杂 completion block
+        [UIView animateWithDuration:0.3 animations:^{
+            banner.alpha = 1.0;
         }];
+
+        // 用 GCD 延迟移除，避免 block 捕获问题
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.5 * NSEC_PER_SEC)),
+                       dispatch_get_main_queue(), ^{
+            [banner removeFromSuperview];
+        });
     });
 }
 
@@ -163,7 +162,7 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
 - (void)startRunning {
     %orig;
 
-    // 每次打开相机都重新尝试加载视频（方便调试）
+    // 每次打开相机都重新尝试加载视频
     if (gProvider) {
         VCamProviderDestroy(gProvider);
         gProvider = NULL;
